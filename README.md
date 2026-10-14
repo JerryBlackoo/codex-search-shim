@@ -5,7 +5,7 @@
 | 工具 | 搜索来源 | 执行方 | 特点 |
 | --- | --- | --- | --- |
 | `web_search` | Google（经 [Antigravity Tools](https://github.com/lbjlaq/Antigravity-Manager) 的 Gemini `googleSearch`） | 本中间层 | 返回 Gemini 整理的摘要 + 来源链接，约 5–13 秒 |
-| `web_run` | OpenAI 独立搜索接口 `/alpha/search` | Gemini：本中间层；GPT：Codex 原生 | 返回大量原始结果（标题、URL、摘要），可 `open_url` 读网页，约 1–3 秒 |
+| `web_run` | OpenAI 独立搜索接口 `/alpha/search` | Gemini：本中间层；GPT：Codex 原生 | 返回大量原始结果（标题、URL、摘要），可打开网页、点击页内链接、页内查找，约 1–3 秒 |
 
 纯 Python 标准库实现，无第三方依赖。另附一个 MCP 服务器 `mcp_search.py`，可把 Google 搜索作为 MCP 工具提供给 Codex、Cursor 等客户端。
 
@@ -23,9 +23,29 @@ Codex ──► codex-search-shim (127.0.0.1:8047) ──┬─► Antigravity T
 ```
 
 - **按模型分流**：模型在 Antigravity 的 `/v1/models` 列表里（或以 `gemini-`、`claude-`、`gpt-oss-` 开头）就发往 Antigravity，其余原样发往 OpenAI。
-- **Gemini 请求**：把托管 `web_search` 换成两个函数工具 `web_search(query)` 和 `web_run(query | open_url)`。模型调用时由中间层执行：
+- **Gemini 请求**：把托管 `web_search` 换成两个函数工具 `web_search(query)` 和 `web_run(...)`。模型调用时由中间层执行：
   - `web_search` → 单独发一个只带 `googleSearch` 的 Gemini 请求（默认模型 `gemini-3.8-flash-high`），解析 `groundingMetadata` 得到来源；
   - `web_run` → 用 Codex 请求里自带的 ChatGPT 凭据（`Authorization`、`chatgpt-account-id`）调用 OpenAI `/alpha/search`。
+
+### Gemini 的 `web_run`
+
+与 GPT 原生 `web_run` 的命令一致（截图除外）：
+
+| 命令 | 作用 |
+| --- | --- |
+| `search_query` | 搜索，可选 `recency`（最近 N 天）、`domains`（限定域名） |
+| `image_query` | 图片搜索 |
+| `open` | 按 URL 或引用 id 打开页面，可选 `lineno`；PDF 返回文本 |
+| `click` | 按编号点击已打开页面里的链接（`ref_id` + `id`） |
+| `find` | 在页面里查找文字 |
+| `finance` / `weather` / `sports` / `time` | 股价、天气、体育赛程积分、时区时间 |
+| `response_length` | `short` / `medium` / `long` |
+
+`/alpha/search` 按请求里的 `id` 在服务端保存浏览状态，引用 id（`turn0view0`、`turn1search3`）和页内链接编号只在同一个 `id` 下有效。中间层用 Codex 请求头里的 `thread-id`（即会话 id）作为这个 `id`，所以 Gemini 在整个会话里（包括后续轮次）都能继续点击之前打开的页面，GPT 和 Gemini 在同一会话里也共享这份状态。
+
+返回正文中的 ChatGPT 引用标记会被转换为纯文本：页面引用写成 `[ref_id: turn0view0]`，页内链接写成 `【12†链接文字】`。
+
+`screenshot`（PDF 截图）没有提供给 Gemini：截图图片只放在 `encrypted_output` 里，只有 OpenAI 模型能解密。
 - **GPT 请求**：额外注入一个函数工具 `web_search(query)`（Google），GPT 原生的 `web_run` 不动，由 Codex 调 `/v1/alpha/search`，中间层原样转发。
 - 中间层在同一个流式响应里循环（最多 8 轮）：执行搜索 → 向 Codex 发出标准 `web_search_call` 事件（Codex 界面显示 `web search: ...`）→ 把结果作为 `function_call_output` 喂回模型 → 继续生成。
 - 如果同一轮模型还调用了 Codex 自己的工具（shell、apply_patch 等），中间层结束本次响应让 Codex 执行；下一次请求里的 `web_search_call` 历史项会被还原为 `function_call` + `function_call_output`，结果来自本地持久缓存 `~/.cache/codex-search-shim/results.json`。

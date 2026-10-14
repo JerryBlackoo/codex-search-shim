@@ -60,22 +60,87 @@ SEARCH_FN_TOOL = {
     },
 }
 WEB_RUN_FN = "web_run"
+def _ops(desc, props, required):
+    return {"type": "array", "description": desc,
+            "items": {"type": "object", "properties": props, "required": required}}
+
+
+_STR = {"type": "string"}
+_INT = {"type": "integer"}
 WEB_RUN_FN_TOOL = {
     "type": "function",
     "name": WEB_RUN_FN,
     "description": (
-        "OpenAI web search. Pass `query` to get ranked results (title, URL, "
-        "snippet) quickly, or pass `open_url` to fetch and read a specific web "
-        "page. Prefer this for fast lookups and for reading pages found by a search."
+        "OpenAI web browsing tool (search index + live page fetch). Pass one or more "
+        "commands; each returns ranked results or page text. Pages and results get a "
+        "reference id such as `turn0view0` or `turn1search3`, and links inside an "
+        "opened page are numbered like 【12†Link text】. Use `click` with the page's "
+        "reference id and the link number to follow a link, `find` to locate text in a "
+        "page, and `open` with `lineno` to read a page from a given line (PDFs are "
+        "returned as text). Also supports image search, stock prices, weather, sports "
+        "and time lookups. References "
+        "stay valid for the whole conversation. Returns raw results with real URLs; "
+        "web_search (Google) instead returns a written summary."
     ),
     "parameters": {
         "type": "object",
         "properties": {
-            "query": {"type": "string", "description": "Search query."},
-            "open_url": {"type": "string", "description": "URL of a page to open and read."},
+            "search_query": _ops("Web searches.", {
+                "q": dict(_STR, description="Search query."),
+                "recency": dict(_INT, description="Only results from the last N days."),
+                "domains": {"type": "array", "items": _STR, "description": "Restrict to these domains."},
+            }, ["q"]),
+            "image_query": _ops("Image searches.", {
+                "q": dict(_STR, description="Search query."),
+                "recency": dict(_INT, description="Only results from the last N days."),
+                "domains": {"type": "array", "items": _STR, "description": "Restrict to these domains."},
+            }, ["q"]),
+            "open": _ops("Open pages by URL or reference id.", {
+                "ref_id": dict(_STR, description="URL or reference id (e.g. turn0search2, turn1view0)."),
+                "lineno": dict(_INT, description="Line number to position the page at."),
+            }, ["ref_id"]),
+            "click": _ops("Follow numbered links from previously opened pages.", {
+                "ref_id": dict(_STR, description="Reference id of the page containing the link."),
+                "id": dict(_INT, description="Link number, e.g. 12 for 【12†...】."),
+            }, ["ref_id", "id"]),
+            "find": _ops("Find text in pages.", {
+                "ref_id": dict(_STR, description="URL or reference id of the page."),
+                "pattern": dict(_STR, description="Text to find."),
+            }, ["ref_id", "pattern"]),
+            "finance": _ops("Stock / crypto / index prices.", {
+                "ticker": dict(_STR, description="Ticker symbol."),
+                "type": dict(_STR, description="Asset type: equity, fund, crypto or index."),
+                "market": dict(_STR, description='ISO 3166-1 alpha-3 country code, "OTC", or "" for crypto.'),
+            }, ["ticker", "type"]),
+            "weather": _ops("Weather forecasts.", {
+                "location": dict(_STR, description='"Country, Area, City".'),
+                "start": dict(_STR, description="Start date YYYY-MM-DD (default today)."),
+                "duration": dict(_INT, description="Number of days (default 7)."),
+            }, ["location"]),
+            "sports": _ops("Sports schedules and standings.", {
+                "fn": dict(_STR, description="schedule or standings."),
+                "league": dict(_STR, description="League, e.g. nba, nfl, epl."),
+                "team": dict(_STR, description="3-4 letter team alias."),
+                "opponent": dict(_STR, description="Opponent alias, used with team."),
+                "date_from": dict(_STR, description="Start date YYYY-MM-DD."),
+                "date_to": dict(_STR, description="End date YYYY-MM-DD."),
+                "num_games": dict(_INT, description="Number of games to return."),
+                "locale": dict(_STR, description="Locale, e.g. en-US."),
+            }, ["fn", "league"]),
+            "time": _ops("Current time at UTC offsets.", {
+                "utc_offset": dict(_STR, description='Like "+08:00".'),
+            }, ["utc_offset"]),
+            "response_length": {"type": "string", "enum": ["short", "medium", "long"],
+                                "description": "Length of the returned text (default medium)."},
+            "query": dict(_STR, description="Shortcut for a single search_query."),
+            "open_url": dict(_STR, description="Shortcut for a single open."),
         },
     },
 }
+# "screenshot" is left out: its image is only returned inside encrypted_output,
+# which non-OpenAI models cannot read. Use open on the PDF to get its text.
+WEB_RUN_COMMANDS = ("search_query", "image_query", "open", "click", "find",
+                    "finance", "weather", "sports", "time")
 SEARCH_FNS = {SEARCH_FN, WEB_RUN_FN}
 CLIENT_CALL_TYPES = {"function_call", "custom_tool_call", "local_shell_call",
                      "computer_call", "mcp_call", "tool_search_call"}
@@ -297,25 +362,74 @@ def has_openai_auth(headers):
     return "authorization" in keys and "chatgpt-account-id" in keys
 
 
-def run_web_run(args, headers, model, user_text):
+def web_run_commands(args):
+    """Normalise web_run function arguments into /alpha/search commands."""
+    commands = {}
+    for k in WEB_RUN_COMMANDS:
+        v = args.get(k)
+        if isinstance(v, dict):
+            v = [v]
+        if isinstance(v, list) and v:
+            commands[k] = [x for x in v if isinstance(x, dict)]
+    if (args.get("query") or "").strip():
+        commands.setdefault("search_query", []).append({"q": args["query"].strip()})
+    if (args.get("open_url") or "").strip():
+        commands.setdefault("open", []).append({"ref_id": args["open_url"].strip()})
+    if sum(len(v) for v in commands.values()) == 0:
+        raise ValueError("web_run needs at least one command, e.g. search_query or open")
+    if "sports" in commands:
+        commands["sports"] = [dict({"tool": "sports"}, **op) for op in commands["sports"]]
+    commands["response_length"] = args.get("response_length") or "medium"
+    return commands
+
+
+def describe_web_run(commands):
+    """(label, web_search_call action) for display in Codex."""
+    parts = []
+    for k in WEB_RUN_COMMANDS:
+        for op in commands.get(k) or []:
+            if k in ("search_query", "image_query"):
+                parts.append(op.get("q", ""))
+            elif k == "click":
+                parts.append(f"click {op.get('ref_id')} #{op.get('id')}")
+            elif k == "find":
+                parts.append(f"find '{op.get('pattern')}' in {op.get('ref_id')}")
+            elif k == "open":
+                parts.append(f"open {op.get('ref_id')}" + (f" L{op['lineno']}" if op.get("lineno") else ""))
+            else:
+                parts.append(f"{k} " + json.dumps(op, ensure_ascii=False))
+    label = "; ".join(parts)
+    opens = commands.get("open") or []
+    if len(parts) == 1 and opens and str(opens[0].get("ref_id", "")).startswith("http"):
+        return label, {"type": "open_page", "url": opens[0]["ref_id"]}
+    return label, {"type": "search", "query": label}
+
+
+_CITE = re.compile("\ue200cite\ue202(.*?)\ue201", re.S)
+
+
+def readable_web_run_text(text):
+    """Turn ChatGPT citation markers into plain text the model can act on."""
+    def sub(m):
+        inner = m.group(1).replace("\ue202", " ")
+        return f"【{inner}】" if re.match(r"\d+\u2020", inner) else f"[ref_id: {inner}]"
+    return re.sub(r"[\ue000-\uf8ff]", "", _CITE.sub(sub, text or ""))
+
+
+def run_web_run(args, headers, model, user_text, session_id=None):
     """OpenAI standalone search (/alpha/search) with the client's ChatGPT credentials.
 
-    Returns (text, sources, action) where action is the web_search_call action.
+    session_id keeps reference ids (turnNview0, numbered links) valid across calls,
+    because the endpoint stores browsing state per id.
+    Returns (text, sources, label).
     """
-    query = (args.get("query") or "").strip()
-    url = (args.get("open_url") or "").strip()
-    if url:
-        commands, action = {"open": [{"ref_id": url}]}, {"type": "open_page", "url": url}
-    elif query:
-        commands, action = {"search_query": [{"q": query}]}, {"type": "search", "query": query}
-    else:
-        raise ValueError("web_run needs `query` or `open_url`")
-    commands["response_length"] = "medium"
+    commands = web_run_commands(args)
+    label, _ = describe_web_run(commands)
     body = {
-        "id": str(uuid.uuid4()),
+        "id": session_id or str(uuid.uuid4()),
         "model": model,
         "input": [{"type": "message", "role": "user",
-                   "content": [{"type": "input_text", "text": user_text or query or url}]}],
+                   "content": [{"type": "input_text", "text": user_text or label}]}],
         "commands": commands,
         "settings": {"allowed_callers": ["direct"], "external_web_access": True},
         "max_output_tokens": 10000,
@@ -334,10 +448,8 @@ def run_web_run(args, headers, model, user_text):
         conn.close()
     sources = [{"type": "url", "url": r["url"], "title": r.get("title") or ""}
                for r in data.get("results") or [] if isinstance(r, dict) and r.get("url")]
-    # Strip private-use citation markers that only render inside ChatGPT.
-    text = re.sub(r"[\ue000-\uf8ff]", "", data.get("output") or "").strip() or "(no results)"
-    head = f"OpenAI web search results for: {query}" if query else f"Contents of {url}"
-    return head + "\n\n" + text, sources, action
+    text = readable_web_run_text(data.get("output")).strip() or "(no results)"
+    return f"OpenAI web_run results for: {label}\n\n{text}", sources, label
 
 
 def last_user_text(items):
@@ -449,6 +561,8 @@ def search_loop(body, headers, emit, openai=False):
     """
     auth = antigravity_auth() or headers.get("Authorization")
     user_text = last_user_text(body.get("input"))
+    lower = {k.lower(): v for k, v in headers.items()}
+    session_id = lower.get("thread-id") or lower.get("session-id") or body.get("prompt_cache_key")
     cur_input = rewrite_input(body.get("input"), only_ours=openai)
     if isinstance(cur_input, str):
         cur_input = [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": cur_input}]}]
@@ -546,11 +660,12 @@ def search_loop(body, headers, emit, openai=False):
                 args = {"query": call.get("arguments") or ""}
             name = call.get("name")
             query = args.get("query") or ""
-            if name == WEB_RUN_FN and args.get("open_url") and not query:
-                action = {"type": "open_page", "url": args["open_url"]}
-                key = "open " + args["open_url"]
-            else:
-                action, key = {"type": "search", "query": query}, query
+            action, key = {"type": "search", "query": query}, query
+            if name == WEB_RUN_FN:
+                try:
+                    key, action = describe_web_run(web_run_commands(args))
+                except ValueError:
+                    pass
             ws_id = "ws_" + uuid.uuid4().hex[:24]
             item = {"id": ws_id, "type": "web_search_call", "status": "in_progress", "action": action}
             emit({"type": "response.output_item.added", "output_index": idx, "item": item})
@@ -559,7 +674,7 @@ def search_loop(body, headers, emit, openai=False):
             t0 = time.time()
             try:
                 if name == WEB_RUN_FN:
-                    result, sources, _ = run_web_run(args, headers, body.get("model"), user_text)
+                    result, sources, _ = run_web_run(args, headers, body.get("model"), user_text, session_id)
                 else:
                     result, sources = run_search(query, auth)
                 status = "completed"
@@ -621,6 +736,9 @@ class Handler(BaseHTTPRequestHandler):
         path = urllib.parse.urlsplit(self.path).path
         if path.rstrip("/").endswith("/alpha/search"):
             # Standalone search is executed by Codex itself, so any model may use it.
+            if os.environ.get("SHIM_DUMP_DIR"):  # TEMP
+                with open(os.path.join(os.environ["SHIM_DUMP_DIR"], f"alpha_{time.time():.3f}.json"), "wb") as f:
+                    f.write(raw)
             queries = [c.get("q") for c in ((body or {}).get("commands") or {}).get("search_query") or []
                        if isinstance(c, dict) and c.get("q")] if isinstance(body, dict) else []
             if Config.google_for_web_run and queries:
