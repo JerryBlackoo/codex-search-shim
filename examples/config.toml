@@ -1,0 +1,19 @@
+# ~/.codex/config.toml (relevant parts)
+model = "gpt-6.1-sol"
+model_provider = "custom"
+model_catalog_json = "/home/you/.codex/models_combined.json"
+
+[model_providers.custom]
+name = "Custom Node"
+base_url = "http://127.0.0.1:8047/v1"
+wire_api = "responses"
+requires_openai_auth = true
+supports_websockets = false
+supports_standalone_web_search = true
+
+# Optional: Google search as a separate MCP tool.
+[mcp_servers.antigravity_search]
+command = "/usr/bin/python3"
+args = ["/home/you/Projects/codex-search-shim/mcp_search.py"]
+startup_timeout_sec = 20
+tool_timeout_sec = 120

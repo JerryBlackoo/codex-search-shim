@@ -1,0 +1,11 @@
+[Unit]
+Description=Codex web_search shim for Antigravity Tools
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/python3 @DIR@/shim.py --listen 127.0.0.1:8047 --upstream http://127.0.0.1:8045
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target
