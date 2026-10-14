@@ -160,7 +160,7 @@ Cursor（`~/.cursor/mcp.json`）：
 | `--upstream` | `http://127.0.0.1:8045` | Antigravity Tools 地址 |
 | `--openai-upstream` | `https://chatgpt.com/backend-api/codex` | GPT 请求的上游 |
 | `--search-model` | `gemini-3.8-flash-high` | 执行 Google 搜索并总结结果的模型；换成 `gemini-3.8-flash-low` 更快但总结更简略 |
-| `--web-run-model` | `gpt-6-luna` | 非 GPT 模型调用 `/alpha/search` 时固定的 OpenAI 模型名 |
+| `--web-run-model` | `gpt-5.6-luna` | 非 GPT 模型调用 `/alpha/search` 时固定的 OpenAI 模型名 |
 | `--max-rounds` | `8` | 单次响应内最多搜索轮数 |
 | `--cache-file` | `~/.cache/codex-search-shim/results.json` | 搜索结果缓存 |
 | `--no-web-run` | 关 | 经典模式下不给 Gemini 提供 OpenAI 的 `web_run` |

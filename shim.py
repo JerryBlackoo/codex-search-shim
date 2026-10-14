@@ -151,7 +151,7 @@ class Config:
     # Models not served by Antigravity go here unchanged (Codex ChatGPT-auth backend).
     openai_upstream = "https://chatgpt.com/backend-api/codex"
     search_model = "gemini-3.8-flash-high"
-    web_run_model = "gpt-6-luna"
+    web_run_model = "gpt-5.6-luna"
     max_rounds = 8
     web_run = True
     google_for_web_run = False
@@ -1119,7 +1119,7 @@ def main():
                    help="where non-Antigravity models are forwarded")
     p.add_argument("--search-model", default=Config.search_model)
     p.add_argument("--web-run-model", default=Config.web_run_model,
-                   help="OpenAI model name sent to /alpha/search for non-GPT models (default: gpt-6-luna)")
+                   help="OpenAI model name sent to /alpha/search for non-GPT models (default: gpt-5.6-luna)")
     p.add_argument("--max-rounds", type=int, default=Config.max_rounds)
     p.add_argument("--cache-file", default=Config.cache_file)
     p.add_argument("--no-web-run", action="store_true",
