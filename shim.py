@@ -92,6 +92,7 @@ class Config:
     google_for_openai = True
     google_wait = 45
     timeout = 600
+    connect_timeout = 15
     cache_file = os.path.expanduser("~/.cache/codex-search-shim/results.json")
     cache_limit = 1000
 
@@ -136,9 +137,13 @@ CACHE: ResultCache = None
 
 
 def upstream_conn(base_url=None):
+    """Connected client for base_url; connecting is bounded by connect_timeout."""
     u = urllib.parse.urlsplit(base_url or Config.upstream)
     cls = http.client.HTTPSConnection if u.scheme == "https" else http.client.HTTPConnection
-    return cls(u.hostname, u.port or (443 if u.scheme == "https" else 80), timeout=Config.timeout), u.path.rstrip("/")
+    conn = cls(u.hostname, u.port or (443 if u.scheme == "https" else 80), timeout=Config.connect_timeout)
+    conn.connect()
+    conn.sock.settimeout(Config.timeout)
+    return conn, u.path.rstrip("/")
 
 
 class AntigravityModels:
@@ -152,8 +157,9 @@ class AntigravityModels:
         with cls.lock:
             if time.time() - cls.fetched < cls.ttl and cls.models:
                 return cls.models
-            conn, base = upstream_conn()
+            conn = None
             try:
+                conn, base = upstream_conn()
                 conn.request("GET", base + "/v1/models", headers={"Authorization": auth_header} if auth_header else {})
                 resp = conn.getresponse()
                 if resp.status == 200:
@@ -162,7 +168,8 @@ class AntigravityModels:
             except Exception as e:
                 log.warning("cannot list Antigravity models: %s", e)
             finally:
-                conn.close()
+                if conn:
+                    conn.close()
             return cls.models
 
 
@@ -465,7 +472,10 @@ def search_loop(body, headers, emit, openai=False):
 
     for rnd in range(Config.max_rounds):
         req["input"] = cur_input
-        conn, base = upstream_conn(upstream)
+        try:
+            conn, base = upstream_conn(upstream)
+        except OSError as e:
+            raise UpstreamError(502, f"cannot connect to upstream {upstream}: {e}".encode())
         fwd = {k: v for k, v in headers.items()
                if k.lower() not in HOP_HEADERS and k.lower() not in ("content-type", "accept")}
         fwd["Content-Type"] = "application/json"
@@ -629,12 +639,13 @@ class Handler(BaseHTTPRequestHandler):
     # ---- plain passthrough
     def _proxy(self, raw, to_openai=False):
         path = self.path
-        if to_openai:
-            conn, base = upstream_conn(Config.openai_upstream)
-            if path.startswith("/v1/"):
-                path = path[3:]
-        else:
-            conn, base = upstream_conn()
+        if to_openai and path.startswith("/v1/"):
+            path = path[3:]
+        try:
+            conn, base = upstream_conn(Config.openai_upstream if to_openai else None)
+        except OSError as e:
+            log.warning("cannot connect to upstream: %s", e)
+            return self._json_error(502, f"shim cannot connect to upstream: {e}")
         fwd = {k: v for k, v in self.headers.items() if k.lower() not in HOP_HEADERS}
         try:
             conn.request(self.command, base + path, raw or None, fwd)
@@ -678,10 +689,10 @@ class Handler(BaseHTTPRequestHandler):
             th.start()
             threads.append(th)
 
-        conn, base = upstream_conn(Config.openai_upstream)
         fwd = {k: v for k, v in self.headers.items() if k.lower() not in HOP_HEADERS}
-        status, data, payload = 502, None, b""
+        status, data, payload, conn = 502, None, b"", None
         try:
+            conn, base = upstream_conn(Config.openai_upstream)
             conn.request("POST", base + "/alpha/search", raw, fwd)
             resp = conn.getresponse()
             status, payload = resp.status, resp.read()
@@ -690,7 +701,8 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             log.warning("openai alpha/search failed: %s", e)
         finally:
-            conn.close()
+            if conn:
+                conn.close()
 
         for th in threads:
             th.join(Config.google_wait)
