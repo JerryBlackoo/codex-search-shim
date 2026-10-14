@@ -136,6 +136,7 @@ Cursor（`~/.cursor/mcp.json`）：
 - Google 搜索走 Antigravity 账号，需遵守 Google / Antigravity 的使用条款；风险主要在这一侧。
 - 只支持 HTTP 流式（SSE），不支持 Responses WebSocket。
 - 请求体如果被压缩（`Content-Encoding`），中间层无法改写，会原样透传。
+- 上下文压缩：Gemini 走 Codex 的本地压缩（普通 `/v1/responses` 摘要请求），已验证可用；GPT 的远程压缩 `/responses/compact` 原样转发给 OpenAI。Gemini 条目的 `context_window` 是 1M，若想更早压缩，可设 `model_auto_compact_token_limit`。
 - 在 Codex 0.162.1、Antigravity Tools 4.x 上测试。
 
 ## 许可
