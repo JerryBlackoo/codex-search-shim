@@ -242,7 +242,7 @@ def run_search(query, auth_header):
     finally:
         conn.close()
     text = "".join(texts).strip() or "(no summary returned)"
-    out = [f"Web search results for: {query}"]
+    out = [f"Google web search results (via Antigravity) for: {query}"]
     if queries:
         out.append("Google queries: " + "; ".join(queries))
     out += ["", text]
