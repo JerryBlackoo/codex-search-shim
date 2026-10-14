@@ -151,6 +151,7 @@ class Config:
     # Models not served by Antigravity go here unchanged (Codex ChatGPT-auth backend).
     openai_upstream = "https://chatgpt.com/backend-api/codex"
     search_model = "gemini-3.8-flash-high"
+    web_run_model = "gpt-6-luna"
     max_rounds = 8
     web_run = True
     google_for_web_run = False
@@ -425,9 +426,10 @@ def run_web_run(args, headers, model, user_text, session_id=None):
     """
     commands = web_run_commands(args)
     label, _ = describe_web_run(commands)
+    req_model = Config.web_run_model if (Config.web_run_model and not (model or "").startswith("gpt-")) else (model or Config.web_run_model)
     body = {
         "id": session_id or str(uuid.uuid4()),
-        "model": model,
+        "model": req_model,
         "input": [{"type": "message", "role": "user",
                    "content": [{"type": "input_text", "text": user_text or label}]}],
         "commands": commands,
@@ -936,6 +938,12 @@ class Handler(BaseHTTPRequestHandler):
         path = urllib.parse.urlsplit(self.path).path
         if path.rstrip("/").endswith("/alpha/search"):
             # Standalone search is executed by Codex itself, so any model may use it.
+            if isinstance(body, dict):
+                req_model = body.get("model")
+                if Config.web_run_model and not (req_model or "").startswith("gpt-"):
+                    log.info("rewriting /alpha/search model %s -> %s", req_model, Config.web_run_model)
+                    body["model"] = Config.web_run_model
+                    raw = json.dumps(body, ensure_ascii=False).encode("utf-8")
             queries = [c.get("q") for c in ((body or {}).get("commands") or {}).get("search_query") or []
                        if isinstance(c, dict) and c.get("q")] if isinstance(body, dict) else []
             if Config.google_for_web_run and queries:
@@ -1110,6 +1118,8 @@ def main():
     p.add_argument("--openai-upstream", default=Config.openai_upstream,
                    help="where non-Antigravity models are forwarded")
     p.add_argument("--search-model", default=Config.search_model)
+    p.add_argument("--web-run-model", default=Config.web_run_model,
+                   help="OpenAI model name sent to /alpha/search for non-GPT models (default: gpt-6-luna)")
     p.add_argument("--max-rounds", type=int, default=Config.max_rounds)
     p.add_argument("--cache-file", default=Config.cache_file)
     p.add_argument("--no-web-run", action="store_true",
@@ -1125,6 +1135,7 @@ def main():
     Config.upstream = a.upstream.rstrip("/")
     Config.openai_upstream = a.openai_upstream.rstrip("/")
     Config.search_model = a.search_model
+    Config.web_run_model = a.web_run_model
     Config.max_rounds = a.max_rounds
     Config.web_run = not a.no_web_run
     Config.google_for_web_run = a.google_for_web_run
