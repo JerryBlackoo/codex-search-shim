@@ -115,6 +115,8 @@ Antigravity 不支持 Codex 的几种工具格式，中间层对发往 Antigravi
 
 代码模式下 Gemini 和 GPT 一样通过 `exec` 里的 `web.run` 使用 OpenAI 搜索，中间层只额外注入 Google 的 `web_search`。
 
+**跨轮推理摘要**：发往 Antigravity 前，历史里的 `reasoning` 项会被换成 `developer` 角色的短附注（只含 Antigravity 返回的 `summary_text`，最多约 4000 字符）。这样下一轮仍能看到上一轮的结论和思路，但不是 OpenAI 那种完整 encrypted reasoning；若摘要里没写下具体数字/名称，后面也无法「回忆」出来。
+
 修改配置或目录后：
 
 - CLI：`codex app-server daemon restart`（TUI 的模型列表来自这个常驻进程的缓存）；
@@ -173,7 +175,7 @@ Cursor（`~/.cursor/mcp.json`）：
 - 请求体如果被压缩（`Content-Encoding`），中间层无法改写，会原样透传。
 - 上下文压缩：Gemini 走 Codex 的本地压缩（普通 `/v1/responses` 摘要请求），已验证可用；GPT 的远程压缩 `/responses/compact` 原样转发给 OpenAI。Gemini 条目的 `context_window` 是 1M，若想更早压缩，可设 `model_auto_compact_token_limit`。
 - Gemini 与 GPT 仍有的差异：
-  - 跨轮推理延续不可用：Antigravity 丢弃历史里的 `reasoning` 项，也不返回 `encrypted_content`；
+  - 跨轮推理不是完整还原：Antigravity 丢弃历史里的 `reasoning` 项，也没有 OpenAI 的 `encrypted_content`；中间层会把各轮 **reasoning summary** 转成 developer 附注喂回模型，便于记住结论和中间判断，但仍是摘要而非完整思维链；
   - `web_run` 的 `screenshot` 不可用（见上文）；
   - `priority` 服务等级只对 OpenAI 有效；
   - GPT 发给子 agent 的消息是 OpenAI 加密的，Gemini 子 agent 读不到 GPT 父 agent 的任务正文（同模型之间不受影响）。

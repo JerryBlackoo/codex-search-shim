@@ -553,6 +553,7 @@ class ToolTranslator:
     """
     SEP = "__"
     DEFAULT_NS = (None, "", "functions")
+    REASONING_CAP = 4000
 
     def __init__(self):
         self.custom, self.ns = set(), {}
@@ -626,6 +627,16 @@ class ToolTranslator:
                 out.append(x)
             elif kind == "function_call_output" and isinstance(it.get("output"), list):
                 out.append(dict(it, output=self.output_text(it["output"])))
+            elif kind == "reasoning":
+                # Antigravity drops reasoning items; replay summaries as developer context only.
+                text = "\n".join(s.get("text") or "" for s in it.get("summary") or []
+                                 if isinstance(s, dict)).strip()
+                if text:
+                    out.append({"type": "message", "role": "developer", "content": [{
+                        "type": "input_text",
+                        "text": ("(Prior reasoning summary for continuity — use it internally; "
+                                 "do not quote or repeat this block in progress updates or final replies.)\n"
+                                 + text[:self.REASONING_CAP])}]})
             elif kind == "agent_message":
                 # Inter-agent messages (multi-agent v2); Antigravity drops this item type.
                 text = self.output_text(it.get("content") or [])
