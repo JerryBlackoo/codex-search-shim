@@ -85,7 +85,7 @@ class Config:
     upstream = "http://127.0.0.1:8045"
     # Models not served by Antigravity go here unchanged (Codex ChatGPT-auth backend).
     openai_upstream = "https://chatgpt.com/backend-api/codex"
-    search_model = "gemini-3.8-flash-low"
+    search_model = "gemini-3.8-flash-high"
     max_rounds = 8
     web_run = True
     google_for_web_run = False

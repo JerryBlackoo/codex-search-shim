@@ -24,7 +24,7 @@ Codex ──► codex-search-shim (127.0.0.1:8047) ──┬─► Antigravity T
 
 - **按模型分流**：模型在 Antigravity 的 `/v1/models` 列表里（或以 `gemini-`、`claude-`、`gpt-oss-` 开头）就发往 Antigravity，其余原样发往 OpenAI。
 - **Gemini 请求**：把托管 `web_search` 换成两个函数工具 `web_search(query)` 和 `web_run(query | open_url)`。模型调用时由中间层执行：
-  - `web_search` → 单独发一个只带 `googleSearch` 的 Gemini 请求（默认模型 `gemini-3.8-flash-low`），解析 `groundingMetadata` 得到来源；
+  - `web_search` → 单独发一个只带 `googleSearch` 的 Gemini 请求（默认模型 `gemini-3.8-flash-high`），解析 `groundingMetadata` 得到来源；
   - `web_run` → 用 Codex 请求里自带的 ChatGPT 凭据（`Authorization`、`chatgpt-account-id`）调用 OpenAI `/alpha/search`。
 - **GPT 请求**：额外注入一个函数工具 `web_search(query)`（Google），GPT 原生的 `web_run` 不动，由 Codex 调 `/v1/alpha/search`，中间层原样转发。
 - 中间层在同一个流式响应里循环（最多 8 轮）：执行搜索 → 向 Codex 发出标准 `web_search_call` 事件（Codex 界面显示 `web search: ...`）→ 把结果作为 `function_call_output` 喂回模型 → 继续生成。
@@ -122,7 +122,7 @@ Cursor（`~/.cursor/mcp.json`）：
 | `--listen` | `127.0.0.1:8047` | 监听地址 |
 | `--upstream` | `http://127.0.0.1:8045` | Antigravity Tools 地址 |
 | `--openai-upstream` | `https://chatgpt.com/backend-api/codex` | GPT 请求的上游 |
-| `--search-model` | `gemini-3.8-flash-low` | 执行 Google 搜索用的模型 |
+| `--search-model` | `gemini-3.8-flash-high` | 执行 Google 搜索并总结结果的模型；换成 `gemini-3.8-flash-low` 更快但总结更简略 |
 | `--max-rounds` | `8` | 单次响应内最多搜索轮数 |
 | `--cache-file` | `~/.cache/codex-search-shim/results.json` | 搜索结果缓存 |
 | `--no-web-run` | 关 | 不给 Gemini 提供 OpenAI 的 `web_run` |
