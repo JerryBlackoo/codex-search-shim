@@ -25,7 +25,7 @@
   "upgrade": null,
   "base_instructions": "You are Gemini 3.8 Flash, accessed through Antigravity Tools and Codex. Follow all system and developer instructions supplied by Codex.",
   "include_skills_usage_instructions": false,
-  "supports_reasoning_summaries": false,
+  "supports_reasoning_summaries": true,
   "default_reasoning_summary": "none",
   "support_verbosity": true,
   "default_verbosity": "low",
@@ -46,5 +46,7 @@
     "image"
   ],
   "supports_search_tool": true,
-  "use_responses_lite": false
+  "use_responses_lite": true,
+  "tool_mode": "code_mode_only",
+  "multi_agent_version": "v2"
 }

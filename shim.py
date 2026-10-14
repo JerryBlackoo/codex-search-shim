@@ -540,6 +540,145 @@ def is_search_call(item):
     return isinstance(item, dict) and item.get("type") == "function_call" and item.get("name") in SEARCH_FNS
 
 
+# ---------------------------------------------------------------- tool translation
+
+class ToolTranslator:
+    """Make Codex tool formats usable through Antigravity, and back.
+
+    Antigravity drops the `additional_tools` input item (code mode), cannot
+    produce freeform `custom` tool calls (the model ends with "task ready"),
+    and does not understand namespaced tools. Requests are rewritten to plain
+    function tools; the model's function calls are mapped back to what Codex
+    expects (custom_tool_call, or function_call with `namespace`).
+    """
+    SEP = "__"
+    DEFAULT_NS = (None, "", "functions")
+
+    def __init__(self):
+        self.custom, self.ns = set(), {}
+
+    def flat(self, ns, name):
+        if ns in self.DEFAULT_NS:
+            return name
+        flat = f"{ns}{self.SEP}{name}"
+        self.ns[flat] = (ns, name)
+        return flat
+
+    def tool(self, t, ns=None, ns_desc=""):
+        if not isinstance(t, dict):
+            return t
+        kind = t.get("type")
+        if kind not in ("custom", "function"):
+            return t
+        name = self.flat(ns, t.get("name"))
+        desc = ((f"[{ns}] {ns_desc}\n" if ns not in self.DEFAULT_NS and ns_desc else "")
+                + (t.get("description") or ""))
+        if kind == "function":
+            return dict(t, name=name, description=desc)
+        self.custom.add(name)
+        fmt = t.get("format") or {}
+        if fmt.get("definition"):
+            desc += (f"\n\nThe `input` must follow this {fmt.get('syntax', '')} grammar exactly:\n"
+                     f"{fmt['definition']}")
+        desc += "\n\nPut the complete raw input for this tool (not JSON-encoded) in the `input` string."
+        return {"type": "function", "name": name, "description": desc,
+                "parameters": {"type": "object", "required": ["input"],
+                               "properties": {"input": {"type": "string", "description": "Raw tool input."}}}}
+
+    def tools(self, tools):
+        out = []
+        for t in tools or []:
+            if isinstance(t, dict) and t.get("type") == "namespace":
+                for sub in t.get("tools") or []:
+                    out.append(self.tool(sub, t.get("name"), t.get("description") or ""))
+            else:
+                out.append(self.tool(t))
+        return out
+
+    def request(self, body_tools, items):
+        """(tools, input) for Antigravity; also returns whether code mode is active."""
+        tools, out, code_mode = list(body_tools or []), [], False
+        for it in items if isinstance(items, list) else []:
+            kind = it.get("type") if isinstance(it, dict) else None
+            if kind == "additional_tools":
+                tools += it.get("tools") or []
+                code_mode = True
+                continue
+            out.append(it)
+        return tools, out, code_mode
+
+    def input_items(self, items):
+        if not isinstance(items, list):
+            return items
+        out = []
+        for it in items:
+            kind = it.get("type") if isinstance(it, dict) else None
+            if kind == "custom_tool_call":
+                out.append({"type": "function_call", "call_id": it.get("call_id"),
+                            "name": self.flat(it.get("namespace"), it.get("name")),
+                            "arguments": json.dumps({"input": it.get("input") or ""}, ensure_ascii=False)})
+            elif kind == "custom_tool_call_output":
+                out.append({"type": "function_call_output", "call_id": it.get("call_id"),
+                            "output": self.output_text(it.get("output"))})
+            elif kind == "function_call" and it.get("namespace") not in self.DEFAULT_NS:
+                x = {k: v for k, v in it.items() if k != "namespace"}
+                x["name"] = self.flat(it["namespace"], it.get("name"))
+                out.append(x)
+            elif kind == "function_call_output" and isinstance(it.get("output"), list):
+                out.append(dict(it, output=self.output_text(it["output"])))
+            elif kind == "agent_message":
+                # Inter-agent messages (multi-agent v2); Antigravity drops this item type.
+                text = self.output_text(it.get("content") or [])
+                for c in it.get("content") or []:
+                    if isinstance(c, dict) and c.get("type") == "encrypted_content":
+                        payload = c.get("encrypted_content") or ""
+                        # Codex stores non-OpenAI payloads as plain text in this field.
+                        text += ("[encrypted payload from an OpenAI model; not readable here]"
+                                 if payload.startswith("gAAAAA") else payload)
+                out.append({"type": "message", "role": "user",
+                            "content": [{"type": "input_text", "text": text}]})
+            else:
+                out.append(it)
+        return out
+
+    @staticmethod
+    def output_text(output):
+        if not isinstance(output, list):
+            return output if isinstance(output, str) else json.dumps(output, ensure_ascii=False)
+        parts = []
+        for c in output:
+            if isinstance(c, dict) and c.get("type") in ("input_text", "output_text", "text"):
+                parts.append(c.get("text") or "")
+            elif isinstance(c, dict) and c.get("type") in ("input_image", "image"):
+                parts.append("[image omitted]")
+        return "\n".join(parts)
+
+    def is_converted(self, item):
+        return (isinstance(item, dict) and item.get("type") == "function_call"
+                and (item.get("name") in self.custom or item.get("name") in self.ns))
+
+    def response_item(self, item):
+        """Codex-facing copy of a model output item."""
+        if not self.is_converted(item):
+            return item
+        name = item.get("name")
+        if name in self.custom:
+            try:
+                raw = (json.loads(item.get("arguments") or "{}") or {}).get("input", "")
+            except ValueError:
+                raw = item.get("arguments") or ""
+            orig = self.ns.get(name, (None, name))
+            x = {"type": "custom_tool_call", "id": item.get("id"), "call_id": item.get("call_id"),
+                 "name": orig[1], "input": raw if isinstance(raw, str) else json.dumps(raw)}
+            if orig[0] not in self.DEFAULT_NS:
+                x["namespace"] = orig[0]
+            if item.get("status"):
+                x["status"] = item["status"]
+            return x
+        ns, orig = self.ns[name]
+        return dict(item, name=orig, namespace=ns)
+
+
 # ---------------------------------------------------------------- core loop
 
 class UpstreamError(Exception):
@@ -566,8 +705,19 @@ def search_loop(body, headers, emit, openai=False):
     cur_input = rewrite_input(body.get("input"), only_ours=openai)
     if isinstance(cur_input, str):
         cur_input = [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": cur_input}]}]
-    with_web_run = not openai and Config.web_run and has_openai_auth(headers)
-    req = dict(body, tools=rewrite_tools(body.get("tools") or [], with_web_run, add_search=openai), stream=True)
+    tr = None if openai else ToolTranslator()
+    tools = body.get("tools") or []
+    code_mode = False
+    if tr:
+        tools, cur_input, code_mode = tr.request(tools, cur_input)
+        cur_input = tr.input_items(cur_input)
+    # In code mode the model has Codex's own web_run inside `exec`.
+    with_web_run = not openai and not code_mode and Config.web_run and has_openai_auth(headers)
+    add_search = (openai or code_mode) and Config.google_for_openai
+    tools = rewrite_tools(tools, with_web_run, add_search=add_search)
+    if tr:
+        tools = tr.tools(tools)
+    req = dict(body, tools=tools, stream=True)
     if openai:
         upstream, resp_path = Config.openai_upstream, "/responses"
     else:
@@ -600,6 +750,7 @@ def search_loop(body, headers, emit, openai=False):
             if resp.status != 200:
                 raise UpstreamError(resp.status, resp.read())
             round_items, searches, client_calls, idxmap, final_resp = [], [], False, {}, None
+            custom_idx = set()
             for _, data in iter_sse(resp):
                 if data is None:
                     continue
@@ -628,6 +779,10 @@ def search_loop(body, headers, emit, openai=False):
                         continue
                     idxmap[oi] = idx
                     idx += 1
+                    if tr and tr.is_converted(ev.get("item")):
+                        if ev["item"].get("name") in tr.custom:
+                            custom_idx.add(oi)
+                        ev = dict(ev, item=tr.response_item(ev["item"]))
                 if oi is not None:
                     mapped = idxmap.get(oi, oi)
                     if mapped is None:
@@ -635,13 +790,20 @@ def search_loop(body, headers, emit, openai=False):
                             searches.append(ev["item"])
                             round_items.append(ev["item"])
                         continue
+                    if oi in custom_idx and t.startswith("response.function_call_arguments."):
+                        continue
                     ev["output_index"] = mapped
                 if t == "response.output_item.done":
                     item = ev.get("item") or {}
                     round_items.append(item)
+                    if tr:
+                        item = tr.response_item(item)
+                        ev = dict(ev, item=item)
                     out_items.append(item)
                     if item.get("type") in CLIENT_CALL_TYPES:
                         client_calls = True
+                        log.debug("client call %s.%s %s", item.get("namespace") or "", item.get("name"),
+                                  (item.get("arguments") or item.get("input") or "")[:600])
                 emit(ev)
         finally:
             conn.close()
@@ -747,7 +909,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._search(body, openai=True)
             return self._proxy(raw, to_openai=True)
         log.debug("-> antigravity %s model=%s", self.path, model)
-        if path.rstrip("/").endswith("/responses") and has_search_tool(body):
+        if path.rstrip("/").endswith("/responses") and isinstance(body, dict):
             return self._search(body)
         self._proxy(raw)
 

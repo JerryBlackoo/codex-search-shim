@@ -5,7 +5,7 @@
 | 工具 | 搜索来源 | 执行方 | 特点 |
 | --- | --- | --- | --- |
 | `web_search` | Google（经 [Antigravity Tools](https://github.com/lbjlaq/Antigravity-Manager) 的 Gemini `googleSearch`） | 本中间层 | 返回 Gemini 整理的摘要 + 来源链接，约 5–13 秒 |
-| `web_run` | OpenAI 独立搜索接口 `/alpha/search` | Gemini：本中间层；GPT：Codex 原生 | 返回大量原始结果（标题、URL、摘要），可打开网页、点击页内链接、页内查找，约 1–3 秒 |
+| `web_run` | OpenAI 独立搜索接口 `/alpha/search` | 代码模式（GPT、Gemini）：Codex 原生；经典模式的 Gemini：本中间层 | 返回大量原始结果（标题、URL、摘要），可打开网页、点击页内链接、页内查找，约 1–3 秒 |
 
 纯 Python 标准库实现，无第三方依赖。另附一个 MCP 服务器 `mcp_search.py`，可把 Google 搜索作为 MCP 工具提供给 Codex、Cursor 等客户端。
 
@@ -93,12 +93,27 @@ supports_standalone_web_search = true  # GPT 使用 web_run（/alpha/search）
 
 ### 让 Gemini 出现在模型选择器里
 
-用 `model_catalog_json` 提供一份合并后的模型目录：原有 GPT 条目 + Gemini 条目。Gemini 条目必须是**经典模式**，否则 Codex 会把工具放进代码模式（`exec` JS 工具），经 Antigravity 的 Gemini 处理不了，只会输出 `task ready`：
+用 `model_catalog_json` 提供一份合并后的模型目录：原有 GPT 条目 + Gemini 条目。Gemini 条目可以和 GPT 用完全相同的运行模式：
 
-- 删除 `tool_mode`（不要 `code_mode_only`）和 `multi_agent_version`；
-- `use_responses_lite = false`。
+- `tool_mode = "code_mode_only"`、`use_responses_lite = true`、`multi_agent_version = "v2"`；
+- `supports_reasoning_summaries = true`（Antigravity 会返回推理摘要）；
+- `base_instructions` 建议用 GPT 条目的系统指令改写：换掉模型名，把 `commentary` / `final` 频道的说法改成“进度更新 / 最终回复”，并补充本部署的工具说明（两种搜索、PDF 截图替代办法、子 agent 用法）。
 
 [`examples/gemini-catalog-entry.json`](examples/gemini-catalog-entry.json) 是一个条目示例。可以用 `codex debug models` 检查生效的目录。
+
+### 工具格式翻译（Gemini 与 GPT 行为一致的关键）
+
+Antigravity 不支持 Codex 的几种工具格式，中间层对发往 Antigravity 的请求做双向翻译：
+
+| Codex 格式 | Antigravity 的问题 | 中间层处理 |
+| --- | --- | --- |
+| 代码模式的 `additional_tools` 输入项（`exec`、`wait`、多 agent 工具） | 整项被丢弃，模型看不到工具 | 展开成顶层工具 |
+| `custom` 自由格式工具（`exec`、`apply_patch`） | 模型无法调用，只输出 `task ready` | 改成只有一个字符串参数 `input` 的函数工具（语法定义附在描述里）；模型调用后还原为 `custom_tool_call` |
+| 命名空间工具（`collaboration.spawn_agent` 等） | 不识别 | 展平为 `collaboration__spawn_agent`，调用时还原 `namespace` |
+| 多 agent 消息 `agent_message`（子 agent 的任务、回报） | 被丢弃，子 agent 收不到任务 | 转成普通用户消息 |
+| 历史里的 `custom_tool_call(_output)` | 不识别 | 转成 `function_call(_output)` |
+
+代码模式下 Gemini 和 GPT 一样通过 `exec` 里的 `web.run` 使用 OpenAI 搜索，中间层只额外注入 Google 的 `web_search`。
 
 修改配置或目录后：
 
@@ -145,8 +160,8 @@ Cursor（`~/.cursor/mcp.json`）：
 | `--search-model` | `gemini-3.8-flash-high` | 执行 Google 搜索并总结结果的模型；换成 `gemini-3.8-flash-low` 更快但总结更简略 |
 | `--max-rounds` | `8` | 单次响应内最多搜索轮数 |
 | `--cache-file` | `~/.cache/codex-search-shim/results.json` | 搜索结果缓存 |
-| `--no-web-run` | 关 | 不给 Gemini 提供 OpenAI 的 `web_run` |
-| `--no-google-for-openai` | 关 | 不给 GPT 注入 Google 的 `web_search` |
+| `--no-web-run` | 关 | 经典模式下不给 Gemini 提供 OpenAI 的 `web_run` |
+| `--no-google-for-openai` | 关 | 不给 GPT（以及代码模式的 Gemini）注入 Google 的 `web_search` |
 | `--google-for-web-run` | 关 | 把 Google 结果也合并进 GPT `web_run` 的返回（每次搜索多等 5–10 秒） |
 | `-v` | 关 | 调试日志 |
 
@@ -157,6 +172,11 @@ Cursor（`~/.cursor/mcp.json`）：
 - 只支持 HTTP 流式（SSE），不支持 Responses WebSocket。
 - 请求体如果被压缩（`Content-Encoding`），中间层无法改写，会原样透传。
 - 上下文压缩：Gemini 走 Codex 的本地压缩（普通 `/v1/responses` 摘要请求），已验证可用；GPT 的远程压缩 `/responses/compact` 原样转发给 OpenAI。Gemini 条目的 `context_window` 是 1M，若想更早压缩，可设 `model_auto_compact_token_limit`。
+- Gemini 与 GPT 仍有的差异：
+  - 跨轮推理延续不可用：Antigravity 丢弃历史里的 `reasoning` 项，也不返回 `encrypted_content`；
+  - `web_run` 的 `screenshot` 不可用（见上文）；
+  - `priority` 服务等级只对 OpenAI 有效；
+  - GPT 发给子 agent 的消息是 OpenAI 加密的，Gemini 子 agent 读不到 GPT 父 agent 的任务正文（同模型之间不受影响）。
 - 在 Codex 0.162.1、Antigravity Tools 4.x 上测试。
 
 ## 许可
