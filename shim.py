@@ -736,9 +736,6 @@ class Handler(BaseHTTPRequestHandler):
         path = urllib.parse.urlsplit(self.path).path
         if path.rstrip("/").endswith("/alpha/search"):
             # Standalone search is executed by Codex itself, so any model may use it.
-            if os.environ.get("SHIM_DUMP_DIR"):  # TEMP
-                with open(os.path.join(os.environ["SHIM_DUMP_DIR"], f"alpha_{time.time():.3f}.json"), "wb") as f:
-                    f.write(raw)
             queries = [c.get("q") for c in ((body or {}).get("commands") or {}).get("search_query") or []
                        if isinstance(c, dict) and c.get("q")] if isinstance(body, dict) else []
             if Config.google_for_web_run and queries:
