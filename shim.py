@@ -554,6 +554,7 @@ class ToolTranslator:
     SEP = "__"
     DEFAULT_NS = (None, "", "functions")
     REASONING_CAP = 4000
+    REASONING_KEEP = 5
 
     def __init__(self):
         self.custom, self.ns = set(), {}
@@ -612,8 +613,13 @@ class ToolTranslator:
         if not isinstance(items, list):
             return items
         out = []
-        for it in items:
+        summarized = [i for i, it in enumerate(items)
+                      if isinstance(it, dict) and it.get("type") == "reasoning" and it.get("summary")]
+        keep = set(summarized[-self.REASONING_KEEP:])
+        for i, it in enumerate(items):
             kind = it.get("type") if isinstance(it, dict) else None
+            if kind == "reasoning" and i not in keep:
+                continue
             if kind == "custom_tool_call":
                 out.append({"type": "function_call", "call_id": it.get("call_id"),
                             "name": self.flat(it.get("namespace"), it.get("name")),
