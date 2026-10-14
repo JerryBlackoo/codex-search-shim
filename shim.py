@@ -570,7 +570,6 @@ class ToolTranslator:
     SEP = "__"
     DEFAULT_NS = (None, "", "functions")
     REASONING_CAP = 4000
-    REASONING_KEEP = 5
 
     def __init__(self):
         self.custom, self.ns = set(), {}
@@ -629,15 +628,7 @@ class ToolTranslator:
         if not isinstance(items, list):
             return items
         out = []
-        summarized = []
-        for i, it in enumerate(items):
-            if isinstance(it, dict) and it.get("type") == "reasoning":
-                t = "\n".join(s.get("text") or "" for s in it.get("summary") or []
-                              if isinstance(s, dict)).strip()
-                if t:
-                    summarized.append(i)
-        keep = set(summarized[-self.REASONING_KEEP:])
-        for i, it in enumerate(items):
+        for it in items:
             kind = it.get("type") if isinstance(it, dict) else None
             if kind == "custom_tool_call":
                 out.append({"type": "function_call", "call_id": it.get("call_id"),
@@ -654,8 +645,6 @@ class ToolTranslator:
                 out.append(dict(it, output=self.output_text(it["output"])))
             elif kind == "reasoning":
                 # Antigravity drops reasoning items; replay summaries as developer context only.
-                if i not in keep:
-                    continue
                 raw_text = "\n".join(s.get("text") or "" for s in it.get("summary") or []
                                      if isinstance(s, dict)).strip()
                 if raw_text:
