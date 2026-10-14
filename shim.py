@@ -71,7 +71,7 @@ WEB_RUN_FN_TOOL = {
     "type": "function",
     "name": WEB_RUN_FN,
     "description": (
-        "OpenAI web browsing tool (search index + live page fetch). Pass one or more "
+        "Web browsing tool (search index + live page fetch). Pass one or more "
         "commands; each returns ranked results or page text. Pages and results get a "
         "reference id such as `turn0view0` or `turn1search3`, and links inside an "
         "opened page are numbered like 【12†Link text】. Use `click` with the page's "
@@ -449,7 +449,23 @@ def run_web_run(args, headers, model, user_text, session_id=None):
     sources = [{"type": "url", "url": r["url"], "title": r.get("title") or ""}
                for r in data.get("results") or [] if isinstance(r, dict) and r.get("url")]
     text = readable_web_run_text(data.get("output")).strip() or "(no results)"
-    return f"OpenAI web_run results for: {label}\n\n{text}", sources, label
+    return f"Web search results for: {label}\n\n{text}", sources, label
+
+
+def sanitize_for_antigravity(text):
+    """Scrub obvious Codex / OpenAI / GPT markers from text sent to Antigravity."""
+    if not isinstance(text, str):
+        return text
+    s = text
+    s = re.sub(r"\bCodex\b", "Agent", s)
+    s = re.sub(r"\bOpenAI\b", "AI", s)
+    s = re.sub(r"\$CODEX_HOME\b", "$WORKSPACE_HOME", s)
+    s = re.sub(r"\bgpt-6(?:-astra|-sol|-wm)?\b", "model-advanced", s, flags=re.I)
+    s = re.sub(r"\bgpt-5\.6(?:-sol|-wm)?\b", "model-agentic", s, flags=re.I)
+    s = re.sub(r"\bgpt-6\.1-sol\b", "model-standard", s, flags=re.I)
+    s = re.sub(r"\bGPT-?[0-9]+(?:\.[0-9]+)?\b", "Model", s)
+    s = re.sub(r"\bGPT\b", "LLM", s)
+    return s
 
 
 def last_user_text(items):
@@ -554,6 +570,7 @@ class ToolTranslator:
     SEP = "__"
     DEFAULT_NS = (None, "", "functions")
     REASONING_CAP = 4000
+    REASONING_KEEP = 5
 
     def __init__(self):
         self.custom, self.ns = set(), {}
@@ -612,7 +629,15 @@ class ToolTranslator:
         if not isinstance(items, list):
             return items
         out = []
-        for it in items:
+        summarized = []
+        for i, it in enumerate(items):
+            if isinstance(it, dict) and it.get("type") == "reasoning":
+                t = "\n".join(s.get("text") or "" for s in it.get("summary") or []
+                              if isinstance(s, dict)).strip()
+                if t:
+                    summarized.append(i)
+        keep = set(summarized[-self.REASONING_KEEP:])
+        for i, it in enumerate(items):
             kind = it.get("type") if isinstance(it, dict) else None
             if kind == "custom_tool_call":
                 out.append({"type": "function_call", "call_id": it.get("call_id"),
@@ -629,14 +654,17 @@ class ToolTranslator:
                 out.append(dict(it, output=self.output_text(it["output"])))
             elif kind == "reasoning":
                 # Antigravity drops reasoning items; replay summaries as developer context only.
-                text = "\n".join(s.get("text") or "" for s in it.get("summary") or []
-                                 if isinstance(s, dict)).strip()
-                if text:
+                if i not in keep:
+                    continue
+                raw_text = "\n".join(s.get("text") or "" for s in it.get("summary") or []
+                                     if isinstance(s, dict)).strip()
+                if raw_text:
+                    cleaned = sanitize_for_antigravity(raw_text[:self.REASONING_CAP])
                     out.append({"type": "message", "role": "developer", "content": [{
                         "type": "input_text",
                         "text": ("(Prior reasoning summary for continuity — use it internally; "
                                  "do not quote or repeat this block in progress updates or final replies.)\n"
-                                 + text[:self.REASONING_CAP])}]})
+                                 + cleaned)}]})
             elif kind == "agent_message":
                 # Inter-agent messages (multi-agent v2); Antigravity drops this item type.
                 text = self.output_text(it.get("content") or [])
@@ -644,10 +672,18 @@ class ToolTranslator:
                     if isinstance(c, dict) and c.get("type") == "encrypted_content":
                         payload = c.get("encrypted_content") or ""
                         # Codex stores non-OpenAI payloads as plain text in this field.
-                        text += ("[encrypted payload from an OpenAI model; not readable here]"
+                        text += ("[encrypted payload; not readable here]"
                                  if payload.startswith("gAAAAA") else payload)
                 out.append({"type": "message", "role": "user",
-                            "content": [{"type": "input_text", "text": text}]})
+                            "content": [{"type": "input_text", "text": sanitize_for_antigravity(text)}]})
+            elif kind == "message" and it.get("role") in ("developer", "system"):
+                contents = []
+                for c in it.get("content") or []:
+                    if isinstance(c, dict) and c.get("type") in ("input_text", "text") and isinstance(c.get("text"), str):
+                        contents.append(dict(c, text=sanitize_for_antigravity(c["text"])))
+                    else:
+                        contents.append(c)
+                out.append(dict(it, content=contents))
             else:
                 out.append(it)
         return out
@@ -729,6 +765,8 @@ def search_loop(body, headers, emit, openai=False):
     if tr:
         tools = tr.tools(tools)
     req = dict(body, tools=tools, stream=True)
+    if not openai and isinstance(req.get("instructions"), str):
+        req["instructions"] = sanitize_for_antigravity(req["instructions"])
     if openai:
         upstream, resp_path = Config.openai_upstream, "/responses"
     else:
