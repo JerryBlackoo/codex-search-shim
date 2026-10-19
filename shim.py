@@ -11,9 +11,6 @@ This proxy sits between Codex and Antigravity and:
     (tools = [googleSearch]) against Antigravity, streams a standard
     web_search_call item to Codex, feeds the results back to the model and
     continues the same response;
-  * also offers web_run(query | open_url), executed against OpenAI's
-    standalone search endpoint (/alpha/search) with the ChatGPT credentials
-    Codex already sends, so Gemini can use OpenAI's search index too;
   * rewrites web_search_call items in later history back into
     function_call + function_call_output using a persistent result cache.
 
@@ -59,89 +56,7 @@ SEARCH_FN_TOOL = {
         "required": ["query"],
     },
 }
-WEB_RUN_FN = "web_run"
-def _ops(desc, props, required):
-    return {"type": "array", "description": desc,
-            "items": {"type": "object", "properties": props, "required": required}}
-
-
-_STR = {"type": "string"}
-_INT = {"type": "integer"}
-WEB_RUN_FN_TOOL = {
-    "type": "function",
-    "name": WEB_RUN_FN,
-    "description": (
-        "Web browsing tool (search index + live page fetch). Pass one or more "
-        "commands; each returns ranked results or page text. Pages and results get a "
-        "reference id such as `turn0view0` or `turn1search3`, and links inside an "
-        "opened page are numbered like 【12†Link text】. Use `click` with the page's "
-        "reference id and the link number to follow a link, `find` to locate text in a "
-        "page, and `open` with `lineno` to read a page from a given line (PDFs are "
-        "returned as text). Also supports image search, stock prices, weather, sports "
-        "and time lookups. References "
-        "stay valid for the whole conversation. Returns raw results with real URLs; "
-        "web_search (Google) instead returns a written summary."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "search_query": _ops("Web searches.", {
-                "q": dict(_STR, description="Search query."),
-                "recency": dict(_INT, description="Only results from the last N days."),
-                "domains": {"type": "array", "items": _STR, "description": "Restrict to these domains."},
-            }, ["q"]),
-            "image_query": _ops("Image searches.", {
-                "q": dict(_STR, description="Search query."),
-                "recency": dict(_INT, description="Only results from the last N days."),
-                "domains": {"type": "array", "items": _STR, "description": "Restrict to these domains."},
-            }, ["q"]),
-            "open": _ops("Open pages by URL or reference id.", {
-                "ref_id": dict(_STR, description="URL or reference id (e.g. turn0search2, turn1view0)."),
-                "lineno": dict(_INT, description="Line number to position the page at."),
-            }, ["ref_id"]),
-            "click": _ops("Follow numbered links from previously opened pages.", {
-                "ref_id": dict(_STR, description="Reference id of the page containing the link."),
-                "id": dict(_INT, description="Link number, e.g. 12 for 【12†...】."),
-            }, ["ref_id", "id"]),
-            "find": _ops("Find text in pages.", {
-                "ref_id": dict(_STR, description="URL or reference id of the page."),
-                "pattern": dict(_STR, description="Text to find."),
-            }, ["ref_id", "pattern"]),
-            "finance": _ops("Stock / crypto / index prices.", {
-                "ticker": dict(_STR, description="Ticker symbol."),
-                "type": dict(_STR, description="Asset type: equity, fund, crypto or index."),
-                "market": dict(_STR, description='ISO 3166-1 alpha-3 country code, "OTC", or "" for crypto.'),
-            }, ["ticker", "type"]),
-            "weather": _ops("Weather forecasts.", {
-                "location": dict(_STR, description='"Country, Area, City".'),
-                "start": dict(_STR, description="Start date YYYY-MM-DD (default today)."),
-                "duration": dict(_INT, description="Number of days (default 7)."),
-            }, ["location"]),
-            "sports": _ops("Sports schedules and standings.", {
-                "fn": dict(_STR, description="schedule or standings."),
-                "league": dict(_STR, description="League, e.g. nba, nfl, epl."),
-                "team": dict(_STR, description="3-4 letter team alias."),
-                "opponent": dict(_STR, description="Opponent alias, used with team."),
-                "date_from": dict(_STR, description="Start date YYYY-MM-DD."),
-                "date_to": dict(_STR, description="End date YYYY-MM-DD."),
-                "num_games": dict(_INT, description="Number of games to return."),
-                "locale": dict(_STR, description="Locale, e.g. en-US."),
-            }, ["fn", "league"]),
-            "time": _ops("Current time at UTC offsets.", {
-                "utc_offset": dict(_STR, description='Like "+08:00".'),
-            }, ["utc_offset"]),
-            "response_length": {"type": "string", "enum": ["short", "medium", "long"],
-                                "description": "Length of the returned text (default medium)."},
-            "query": dict(_STR, description="Shortcut for a single search_query."),
-            "open_url": dict(_STR, description="Shortcut for a single open."),
-        },
-    },
-}
-# "screenshot" is left out: its image is only returned inside encrypted_output,
-# which non-OpenAI models cannot read. Use open on the PDF to get its text.
-WEB_RUN_COMMANDS = ("search_query", "image_query", "open", "click", "find",
-                    "finance", "weather", "sports", "time")
-SEARCH_FNS = {SEARCH_FN, WEB_RUN_FN}
+SEARCH_FNS = {SEARCH_FN}
 CLIENT_CALL_TYPES = {"function_call", "custom_tool_call", "local_shell_call",
                      "computer_call", "mcp_call", "tool_search_call"}
 
@@ -151,12 +66,8 @@ class Config:
     # Models not served by Antigravity go here unchanged (Codex ChatGPT-auth backend).
     openai_upstream = "https://chatgpt.com/backend-api/codex"
     search_model = "gemini-3.8-flash-high"
-    web_run_model = "gpt-5.6-luna"
     max_rounds = 8
-    web_run = True
-    google_for_web_run = False
     google_for_openai = True
-    google_wait = 45
     timeout = 600
     connect_timeout = 15
     cache_file = os.path.expanduser("~/.cache/codex-search-shim/results.json")
@@ -339,121 +250,6 @@ def antigravity_auth():
     return "Bearer " + key
 
 
-def merge_google_results(data, google):
-    """Append Google results [(query, text, sources)] to an /alpha/search response."""
-    data = dict(data)
-    parts = [data.get("output") or ""]
-    results = list(data.get("results") or [])
-    for n, (query, text, sources) in enumerate(google):
-        parts.append("=" * 80 + f"\nGoogle search (via Antigravity) for: {query}\n\n{text}")
-        for i, s in enumerate(sources):
-            results.append({"type": "text_result", "domain": urllib.parse.urlsplit(s["url"]).netloc,
-                            "ref_id": f"google{n}_{i}", "title": s.get("title") or "",
-                            "url": s["url"], "snippet": ""})
-    data["output"] = "\n\n".join(p for p in parts if p)
-    data["results"] = results
-    return data
-
-
-OPENAI_AUTH_HEADERS = ("authorization", "chatgpt-account-id", "originator", "user-agent")
-
-
-def has_openai_auth(headers):
-    keys = {k.lower() for k in headers}
-    return "authorization" in keys and "chatgpt-account-id" in keys
-
-
-def web_run_commands(args):
-    """Normalise web_run function arguments into /alpha/search commands."""
-    commands = {}
-    for k in WEB_RUN_COMMANDS:
-        v = args.get(k)
-        if isinstance(v, dict):
-            v = [v]
-        if isinstance(v, list) and v:
-            commands[k] = [x for x in v if isinstance(x, dict)]
-    if (args.get("query") or "").strip():
-        commands.setdefault("search_query", []).append({"q": args["query"].strip()})
-    if (args.get("open_url") or "").strip():
-        commands.setdefault("open", []).append({"ref_id": args["open_url"].strip()})
-    if sum(len(v) for v in commands.values()) == 0:
-        raise ValueError("web_run needs at least one command, e.g. search_query or open")
-    if "sports" in commands:
-        commands["sports"] = [dict({"tool": "sports"}, **op) for op in commands["sports"]]
-    commands["response_length"] = args.get("response_length") or "medium"
-    return commands
-
-
-def describe_web_run(commands):
-    """(label, web_search_call action) for display in Codex."""
-    parts = []
-    for k in WEB_RUN_COMMANDS:
-        for op in commands.get(k) or []:
-            if k in ("search_query", "image_query"):
-                parts.append(op.get("q", ""))
-            elif k == "click":
-                parts.append(f"click {op.get('ref_id')} #{op.get('id')}")
-            elif k == "find":
-                parts.append(f"find '{op.get('pattern')}' in {op.get('ref_id')}")
-            elif k == "open":
-                parts.append(f"open {op.get('ref_id')}" + (f" L{op['lineno']}" if op.get("lineno") else ""))
-            else:
-                parts.append(f"{k} " + json.dumps(op, ensure_ascii=False))
-    label = "; ".join(parts)
-    opens = commands.get("open") or []
-    if len(parts) == 1 and opens and str(opens[0].get("ref_id", "")).startswith("http"):
-        return label, {"type": "open_page", "url": opens[0]["ref_id"]}
-    return label, {"type": "search", "query": label}
-
-
-_CITE = re.compile("\ue200cite\ue202(.*?)\ue201", re.S)
-
-
-def readable_web_run_text(text):
-    """Turn ChatGPT citation markers into plain text the model can act on."""
-    def sub(m):
-        inner = m.group(1).replace("\ue202", " ")
-        return f"【{inner}】" if re.match(r"\d+\u2020", inner) else f"[ref_id: {inner}]"
-    return re.sub(r"[\ue000-\uf8ff]", "", _CITE.sub(sub, text or ""))
-
-
-def run_web_run(args, headers, model, user_text, session_id=None):
-    """OpenAI standalone search (/alpha/search) with the client's ChatGPT credentials.
-
-    session_id keeps reference ids (turnNview0, numbered links) valid across calls,
-    because the endpoint stores browsing state per id.
-    Returns (text, sources, label).
-    """
-    commands = web_run_commands(args)
-    label, _ = describe_web_run(commands)
-    req_model = Config.web_run_model if (Config.web_run_model and not (model or "").startswith("gpt-")) else (model or Config.web_run_model)
-    body = {
-        "id": session_id or str(uuid.uuid4()),
-        "model": req_model,
-        "input": [{"type": "message", "role": "user",
-                   "content": [{"type": "input_text", "text": user_text or label}]}],
-        "commands": commands,
-        "settings": {"allowed_callers": ["direct"], "external_web_access": True},
-        "max_output_tokens": 10000,
-    }
-    fwd = {k: v for k, v in headers.items() if k.lower() in OPENAI_AUTH_HEADERS}
-    fwd["Content-Type"] = "application/json"
-    conn, base = upstream_conn(Config.openai_upstream)
-    try:
-        conn.request("POST", base + "/alpha/search", json.dumps(body, ensure_ascii=False).encode(), fwd)
-        resp = conn.getresponse()
-        raw = resp.read()
-        if resp.status != 200:
-            raise RuntimeError(f"HTTP {resp.status}: {raw[:300].decode('utf-8', 'replace')}")
-        data = json.loads(raw)
-    finally:
-        conn.close()
-    sources = [{"type": "url", "url": r["url"], "title": r.get("title") or ""}
-               for r in data.get("results") or [] if isinstance(r, dict) and r.get("url")]
-    text = readable_web_run_text(data.get("output")).strip() or "(no results)"
-    return f"Web search results for: {label}\n\n{text}", sources, label
-
-
 def sanitize_for_antigravity(text):
     """Scrub obvious Codex / OpenAI / GPT markers from text sent to Antigravity."""
     if not isinstance(text, str):
@@ -468,17 +264,6 @@ def sanitize_for_antigravity(text):
     s = re.sub(r"\bGPT-?[0-9]+(?:\.[0-9]+)?\b", "Model", s)
     s = re.sub(r"\bGPT\b", "LLM", s)
     return s
-
-
-def last_user_text(items):
-    if not isinstance(items, list):
-        return items if isinstance(items, str) else ""
-    for it in reversed(items):
-        if isinstance(it, dict) and it.get("type") == "message" and it.get("role") == "user":
-            for c in it.get("content") or []:
-                if isinstance(c, dict) and c.get("type") == "input_text" and not c.get("text", "").startswith("<"):
-                    return c["text"]
-    return ""
 
 
 # ---------------------------------------------------------------- request rewriting
@@ -509,7 +294,7 @@ def has_search_tool(body):
     return any(isinstance(t, dict) and t.get("type") in SEARCH_TOOL_TYPES for t in body.get("tools") or [])
 
 
-def rewrite_tools(tools, with_web_run=False, add_search=False):
+def rewrite_tools(tools, add_search=False):
     out, added = [], False
     if add_search:
         out.append(SEARCH_FN_TOOL)
@@ -518,8 +303,6 @@ def rewrite_tools(tools, with_web_run=False, add_search=False):
         if isinstance(t, dict) and t.get("type") in SEARCH_TOOL_TYPES:
             if not added:
                 out.append(SEARCH_FN_TOOL)
-                if with_web_run:
-                    out.append(WEB_RUN_FN_TOOL)
                 added = True
         elif isinstance(t, dict) and t.get("type") == "function" and t.get("name") in SEARCH_FNS:
             continue
@@ -726,20 +509,17 @@ class UpstreamError(Exception):
 
 
 def search_loop(body, headers, emit, openai=False):
-    """Run model rounds, executing web_search / web_run calls in between.
+    """Run model rounds, executing web_search calls in between.
 
     openai=False: the model is served by Antigravity; hosted web_search is
-    replaced by web_search (Google) + web_run (OpenAI standalone search).
-    openai=True: the model is served by OpenAI and keeps its native web_run;
+    replaced by web_search (Google).
+    openai=True: the model is served by OpenAI;
     web_search (Google) is added as an extra function tool.
 
     emit(event_dict) receives client-facing Responses stream events.
     Returns the final response object.
     """
     auth = antigravity_auth() or headers.get("Authorization")
-    user_text = last_user_text(body.get("input"))
-    lower = {k.lower(): v for k, v in headers.items()}
-    session_id = lower.get("thread-id") or lower.get("session-id") or body.get("prompt_cache_key")
     cur_input = rewrite_input(body.get("input"), only_ours=openai)
     if isinstance(cur_input, str):
         cur_input = [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": cur_input}]}]
@@ -749,10 +529,8 @@ def search_loop(body, headers, emit, openai=False):
     if tr:
         tools, cur_input, code_mode = tr.request(tools, cur_input)
         cur_input = tr.input_items(cur_input)
-    # In code mode the model has Codex's own web_run inside `exec`.
-    with_web_run = not openai and not code_mode and Config.web_run and has_openai_auth(headers)
     add_search = (openai or code_mode) and Config.google_for_openai
-    tools = rewrite_tools(tools, with_web_run, add_search=add_search)
+    tools = rewrite_tools(tools, add_search=add_search)
     if tr:
         tools = tr.tools(tools)
     req = dict(body, tools=tools, stream=True)
@@ -863,11 +641,6 @@ def search_loop(body, headers, emit, openai=False):
             name = call.get("name")
             query = args.get("query") or ""
             action, key = {"type": "search", "query": query}, query
-            if name == WEB_RUN_FN:
-                try:
-                    key, action = describe_web_run(web_run_commands(args))
-                except ValueError:
-                    pass
             ws_id = "ws_" + uuid.uuid4().hex[:24]
             item = {"id": ws_id, "type": "web_search_call", "status": "in_progress", "action": action}
             emit({"type": "response.output_item.added", "output_index": idx, "item": item})
@@ -875,10 +648,7 @@ def search_loop(body, headers, emit, openai=False):
             emit({"type": "response.web_search_call.searching", "output_index": idx, "item_id": ws_id})
             t0 = time.time()
             try:
-                if name == WEB_RUN_FN:
-                    result, sources, _ = run_web_run(args, headers, body.get("model"), user_text, session_id)
-                else:
-                    result, sources = run_search(query, auth)
+                result, sources = run_search(query, auth)
                 status = "completed"
             except Exception as e:  # report to the model instead of failing the turn
                 log.warning("%s failed for %r: %s", name, key, e)
@@ -934,20 +704,15 @@ class Handler(BaseHTTPRequestHandler):
         model = body.get("model") if isinstance(body, dict) else None
         log.info("POST %s model=%s encoding=%s", self.path, model, self.headers.get("Content-Encoding"))
         if isinstance(body, dict) and log.isEnabledFor(logging.DEBUG):
-            log.debug("tools: %s web__run=%s", tool_names(body), b"web__run" in raw)
+            log.debug("tools: %s", tool_names(body))
         path = urllib.parse.urlsplit(self.path).path
         if path.rstrip("/").endswith("/alpha/search"):
-            # Standalone search is executed by Codex itself, so any model may use it.
+            # Standalone search (/alpha/search) is only valid for native OpenAI GPT models in Codex CLI.
+            # Do not spoof non-GPT models or tamper with requests.
             if isinstance(body, dict):
-                req_model = body.get("model")
-                if Config.web_run_model and not (req_model or "").startswith("gpt-"):
-                    log.info("rewriting /alpha/search model %s -> %s", req_model, Config.web_run_model)
-                    body["model"] = Config.web_run_model
-                    raw = json.dumps(body, ensure_ascii=False).encode("utf-8")
-            queries = [c.get("q") for c in ((body or {}).get("commands") or {}).get("search_query") or []
-                       if isinstance(c, dict) and c.get("q")] if isinstance(body, dict) else []
-            if Config.google_for_web_run and queries:
-                return self._alpha_search(raw, queries)
+                req_model = (body.get("model") or "").strip()
+                if req_model and not req_model.startswith("gpt-"):
+                    return self._json_error(400, f"/alpha/search is only supported for OpenAI GPT models, got: {req_model}")
             return self._proxy(raw, to_openai=True)
         if not is_antigravity_model(model, self.headers.get("Authorization")):
             log.debug("-> openai %s model=%s", self.path, model)
@@ -992,53 +757,6 @@ class Handler(BaseHTTPRequestHandler):
             self._json_error(502, f"shim proxy error: {e}")
         finally:
             conn.close()
-
-    def _alpha_search(self, raw, queries):
-        """OpenAI standalone search plus a parallel Google search, merged into one response."""
-        google, threads = [None] * len(queries), []
-
-        def google_one(i, q):
-            t0 = time.time()
-            try:
-                text, sources = run_search(q, antigravity_auth())
-                google[i] = (q, text, sources)
-                log.info("google for web_run %r -> %d chars, %d sources, %.1fs",
-                         q, len(text), len(sources), time.time() - t0)
-            except Exception as e:
-                log.warning("google for web_run %r failed: %s", q, e)
-
-        for i, q in enumerate(queries):
-            th = threading.Thread(target=google_one, args=(i, q), daemon=True)
-            th.start()
-            threads.append(th)
-
-        fwd = {k: v for k, v in self.headers.items() if k.lower() not in HOP_HEADERS}
-        status, data, payload, conn = 502, None, b"", None
-        try:
-            conn, base = upstream_conn(Config.openai_upstream)
-            conn.request("POST", base + "/alpha/search", raw, fwd)
-            resp = conn.getresponse()
-            status, payload = resp.status, resp.read()
-            if status == 200:
-                data = json.loads(payload)
-        except Exception as e:
-            log.warning("openai alpha/search failed: %s", e)
-        finally:
-            if conn:
-                conn.close()
-
-        for th in threads:
-            th.join(Config.google_wait)
-        found = [g for g in google if g]
-        if data is None and not found:
-            return self._json_error(status, "alpha/search failed", payload or None)
-        merged = merge_google_results(data or {}, found)
-        out = json.dumps(merged, ensure_ascii=False).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(out)))
-        self.end_headers()
-        self.wfile.write(out)
 
     def _chunk(self, data):
         self.wfile.write(b"%x\r\n%s\r\n" % (len(data), data))
@@ -1118,14 +836,8 @@ def main():
     p.add_argument("--openai-upstream", default=Config.openai_upstream,
                    help="where non-Antigravity models are forwarded")
     p.add_argument("--search-model", default=Config.search_model)
-    p.add_argument("--web-run-model", default=Config.web_run_model,
-                   help="OpenAI model name sent to /alpha/search for non-GPT models (default: gpt-5.6-luna)")
     p.add_argument("--max-rounds", type=int, default=Config.max_rounds)
     p.add_argument("--cache-file", default=Config.cache_file)
-    p.add_argument("--no-web-run", action="store_true",
-                   help="don't offer Antigravity models the OpenAI-backed web_run tool")
-    p.add_argument("--google-for-web-run", action="store_true",
-                   help="also merge Google results into OpenAI standalone search (slower web_run)")
     p.add_argument("--no-google-for-openai", action="store_true",
                    help="don't offer OpenAI models the Google-backed web_search tool")
     p.add_argument("-v", "--verbose", action="store_true")
@@ -1135,10 +847,7 @@ def main():
     Config.upstream = a.upstream.rstrip("/")
     Config.openai_upstream = a.openai_upstream.rstrip("/")
     Config.search_model = a.search_model
-    Config.web_run_model = a.web_run_model
     Config.max_rounds = a.max_rounds
-    Config.web_run = not a.no_web_run
-    Config.google_for_web_run = a.google_for_web_run
     Config.google_for_openai = not a.no_google_for_openai
     global CACHE
     CACHE = ResultCache(a.cache_file, Config.cache_limit)
