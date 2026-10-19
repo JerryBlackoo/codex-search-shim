@@ -67,7 +67,9 @@ class Config:
     openai_upstream = "https://chatgpt.com/backend-api/codex"
     search_model = "gemini-3.8-flash-high"
     max_rounds = 8
-    google_for_openai = True
+    # Code-mode Gemini: also inject Google web_search even when Codex did not
+    # send a hosted web_search tool. GPT traffic is never rewritten.
+    google_for_code_mode = True
     timeout = 600
     connect_timeout = 15
     cache_file = os.path.expanduser("~/.cache/codex-search-shim/results.json")
@@ -311,17 +313,13 @@ def rewrite_tools(tools, add_search=False):
     return out
 
 
-def rewrite_input(items, only_ours=False):
-    """Turn web_search_call history items back into function_call + output.
-
-    only_ours: leave items we did not create (e.g. OpenAI's own) untouched.
-    """
+def rewrite_input(items):
+    """Turn web_search_call history items back into function_call + output."""
     if not isinstance(items, list):
         return items
     out = []
     for it in items:
-        if (isinstance(it, dict) and it.get("type") == "web_search_call"
-                and not (only_ours and CACHE.get(it.get("id")) is None)):
+        if isinstance(it, dict) and it.get("type") == "web_search_call":
             action = it.get("action") or {}
             query = (action.get("query") or "; ".join(action.get("queries") or [])
                      or (("open " + action["url"]) if action.get("url") else ""))
@@ -508,38 +506,30 @@ class UpstreamError(Exception):
         self.status, self.body = status, body
 
 
-def search_loop(body, headers, emit, openai=False):
-    """Run model rounds, executing web_search calls in between.
+def search_loop(body, headers, emit):
+    """Run Antigravity model rounds, executing Google web_search calls in between.
 
-    openai=False: the model is served by Antigravity; hosted web_search is
-    replaced by web_search (Google).
-    openai=True: the model is served by OpenAI;
-    web_search (Google) is added as an extra function tool.
+    Hosted web_search is replaced by the function tool web_search(query).
+    GPT requests never enter this loop — they are proxied unchanged.
 
     emit(event_dict) receives client-facing Responses stream events.
     Returns the final response object.
     """
     auth = antigravity_auth() or headers.get("Authorization")
-    cur_input = rewrite_input(body.get("input"), only_ours=openai)
+    cur_input = rewrite_input(body.get("input"))
     if isinstance(cur_input, str):
         cur_input = [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": cur_input}]}]
-    tr = None if openai else ToolTranslator()
+    tr = ToolTranslator()
     tools = body.get("tools") or []
-    code_mode = False
-    if tr:
-        tools, cur_input, code_mode = tr.request(tools, cur_input)
-        cur_input = tr.input_items(cur_input)
-    add_search = (openai or code_mode) and Config.google_for_openai
+    tools, cur_input, code_mode = tr.request(tools, cur_input)
+    cur_input = tr.input_items(cur_input)
+    add_search = code_mode and Config.google_for_code_mode
     tools = rewrite_tools(tools, add_search=add_search)
-    if tr:
-        tools = tr.tools(tools)
+    tools = tr.tools(tools)
     req = dict(body, tools=tools, stream=True)
-    if not openai and isinstance(req.get("instructions"), str):
+    if isinstance(req.get("instructions"), str):
         req["instructions"] = sanitize_for_antigravity(req["instructions"])
-    if openai:
-        upstream, resp_path = Config.openai_upstream, "/responses"
-    else:
-        upstream, resp_path = Config.upstream, "/v1/responses"
+    upstream, resp_path = Config.upstream, "/v1/responses"
     meta, out_items, idx, usage = None, [], 0, None
 
     def finish(resp, status="completed"):
@@ -716,8 +706,6 @@ class Handler(BaseHTTPRequestHandler):
             return self._proxy(raw, to_openai=True)
         if not is_antigravity_model(model, self.headers.get("Authorization")):
             log.debug("-> openai %s model=%s", self.path, model)
-            if Config.google_for_openai and isinstance(body, dict) and path.rstrip("/").endswith("/responses"):
-                return self._search(body, openai=True)
             return self._proxy(raw, to_openai=True)
         log.debug("-> antigravity %s model=%s", self.path, model)
         if path.rstrip("/").endswith("/responses") and isinstance(body, dict):
@@ -774,7 +762,7 @@ class Handler(BaseHTTPRequestHandler):
             pass
 
     # ---- web_search path
-    def _search(self, body, openai=False):
+    def _search(self, body):
         stream = bool(body.get("stream"))
         headers = dict(self.headers.items())
         started = {"v": False}
@@ -800,7 +788,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._chunk(f"event: {ev['type']}\ndata: {json.dumps(ev, ensure_ascii=False)}\n\n".encode())
 
         try:
-            final = search_loop(body, headers, emit, openai=openai)
+            final = search_loop(body, headers, emit)
             if stream:
                 start_stream()
                 self._chunk(b"")
@@ -838,8 +826,8 @@ def main():
     p.add_argument("--search-model", default=Config.search_model)
     p.add_argument("--max-rounds", type=int, default=Config.max_rounds)
     p.add_argument("--cache-file", default=Config.cache_file)
-    p.add_argument("--no-google-for-openai", action="store_true",
-                   help="don't offer OpenAI models the Google-backed web_search tool")
+    p.add_argument("--no-google-for-code-mode", action="store_true",
+                   help="don't inject Google web_search for code-mode Gemini")
     p.add_argument("-v", "--verbose", action="store_true")
     a = p.parse_args()
     logging.basicConfig(level=logging.DEBUG if a.verbose else logging.INFO,
@@ -848,7 +836,7 @@ def main():
     Config.openai_upstream = a.openai_upstream.rstrip("/")
     Config.search_model = a.search_model
     Config.max_rounds = a.max_rounds
-    Config.google_for_openai = not a.no_google_for_openai
+    Config.google_for_code_mode = not a.no_google_for_code_mode
     global CACHE
     CACHE = ResultCache(a.cache_file, Config.cache_limit)
     host, port = a.listen.rsplit(":", 1)
