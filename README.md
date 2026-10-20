@@ -1,5 +1,13 @@
 # codex-search-shim
 
+> [!WARNING]
+> **本仓库设计不合理，仅供学习与研究，不建议实际部署或用于生产。**
+>
+> 这是将官方 GPT 链路、第三方模型分流与搜索适配混合在一起的历史实验，增加了认证、路由和协议状态管理的复杂度。下面的旧文档与代码仅为保留实验过程，不代表推荐用法或保真保证。
+>
+> 当前独立协议适配实现请查看 [codex-shim](https://github.com/JerryBlackoo/codex-shim)，该项目同样标注了实验性状态与已验证范围。
+
+
 让 [Codex CLI](https://github.com/openai/codex) 里的 **Gemini 使用 Google 联网搜索**，并在同一个 Codex provider 下按模型分流到不同上游（GPT 原样透传）。
 
 | 工具 | 搜索来源 | 执行方 | 特点 |
